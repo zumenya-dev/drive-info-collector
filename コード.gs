@@ -152,7 +152,8 @@ function getSharedDrives() {
     do {
       const params = {
         pageSize: 100,
-        fields: 'nextPageToken,drives(id,name,createdTime,capabilities)'
+        fields: 'nextPageToken,drives(id,name,createdTime,capabilities)',
+        useDomainAdminAccess: true  // ドメイン管理者として全共有ドライブを取得
       };
 
       if (pageToken) {
@@ -268,6 +269,7 @@ function collectItemsRecursive(driveId, parentId, currentPath, level, items, pro
         includeItemsFromAllDrives: true,
         corpora: 'drive',
         driveId: driveId,
+        useDomainAdminAccess: true,
         fields: 'nextPageToken,files(id,name,mimeType,parents,createdTime,modifiedTime,size,owners,lastModifyingUser,sharingUser,webViewLink)'
       };
 
@@ -285,14 +287,15 @@ function collectItemsRecursive(driveId, parentId, currentPath, level, items, pro
           // 詳細な権限情報を取得（共有ドライブ対応）
           let detailedPermissions = [];
           try {
-            // Drive.Permissions.list を使用して権限を取得
             const permissionsResponse = Drive.Permissions.list(file.id, {
               supportsAllDrives: true,
+              useDomainAdminAccess: true,
               fields: 'permissions(id,type,role,emailAddress,displayName,domain)'
             });
             detailedPermissions = permissionsResponse.permissions || [];
           } catch (permError) {
-            console.warn(`権限取得エラー (${file.name}):`, permError);
+            // 権限取得に失敗した場合は空の配列を使用（エラーログは出力しない）
+            detailedPermissions = [];
           }
 
           // アイテム情報を収集
