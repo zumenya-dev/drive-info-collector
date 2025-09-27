@@ -30,11 +30,11 @@ const CONFIG = {
 
   // 権限設定
   ALLOWED_USERS: [
-    'ono-s@demo.gicloud.co.jp'   // 実行許可ユーザーのメールアドレス
+    '*****@*****.co.jp'   // 実行許可ユーザーのメールアドレス
   ],
 
   // 会社ドメイン（外部共有判定用）
-  COMPANY_DOMAIN: 'demo.gicloud.co.jp'
+  COMPANY_DOMAIN: '*****.co.jp'
 };
 
 // =============================================================================
@@ -774,4 +774,5 @@ function getProgressFromProperties() {
     totalDrives: parseInt(properties.get('TOTAL_DRIVES')),
     sharedDrives: JSON.parse(properties.get('SHARED_DRIVES'))
   };
+
 }
