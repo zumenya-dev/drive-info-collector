@@ -9,7 +9,17 @@
  *
  * 作成者: GIC技術部
  * 作成日: 2024年9月26日
- * バージョン: 1.0
+ * バージョン: 1.3
+ *
+ * 変更履歴:
+ * v1.3 (2025/09/28): 権限表示の大幅改善
+ *   - 「管理者」列を追加（コンテンツ管理者の左）
+ *   - フォルダ: 上位権限+個別権限を組み合わせて表示
+ *   - ファイル: 管理者/コンテンツ管理者/投稿者に上位権限を表示
+ *   - 重複除去機能を実装（combinePermissions関数）
+ * v1.2 (2025/09/30): useDomainAdminAccess オプション追加
+ * v1.1 (2025/09/30): 権限取得機能強化
+ * v1.0 (2025/09/29): 初回リリース
  */
 
 // =============================================================================
@@ -34,7 +44,7 @@ const CONFIG = {
   ],
 
   // 会社ドメイン（外部共有判定用）
-  COMPANY_DOMAIN: '*****.co.jp'
+  COMPANY_DOMAINS: ['*****.co.jp']
 };
 
 // =============================================================================
@@ -229,8 +239,23 @@ function getDriveContents(driveId) {
     externalShareCount: 0
   };
 
+  // 共有ドライブレベルの権限を取得
+  let drivePermissions = [];
+  try {
+    const permissionsResponse = Drive.Permissions.list(driveId, {
+      supportsAllDrives: true,
+      useDomainAdminAccess: true,
+      fields: 'permissions(id,type,role,emailAddress,displayName,domain,permissionDetails)'
+    });
+    drivePermissions = permissionsResponse.permissions || [];
+    console.log(`共有ドライブレベル権限取得成功: ${drivePermissions.length}件`);
+  } catch (error) {
+    console.error(`共有ドライブレベル権限取得エラー (${driveId}):`, error);
+    drivePermissions = [];
+  }
+
   // ルートフォルダから開始
-  collectItemsRecursive(driveId, driveId, '/', 0, items, processedIds, stats);
+  collectItemsRecursive(driveId, driveId, '/', 0, items, processedIds, stats, drivePermissions);
 
   return { items, stats };
 }
@@ -244,8 +269,9 @@ function getDriveContents(driveId) {
  * @param {Array} items 収集結果配列
  * @param {Set} processedIds 処理済みID（無限ループ防止）
  * @param {Object} stats 統計情報オブジェクト
+ * @param {Array} drivePermissions 共有ドライブレベルの権限配列
  */
-function collectItemsRecursive(driveId, parentId, currentPath, level, items, processedIds, stats) {
+function collectItemsRecursive(driveId, parentId, currentPath, level, items, processedIds, stats, drivePermissions) {
   // 階層制限チェック
   if (level > CONFIG.MAX_DEPTH) {
     console.warn(`最大階層(${CONFIG.MAX_DEPTH})に達しました: ${currentPath}`);
@@ -286,16 +312,55 @@ function collectItemsRecursive(driveId, parentId, currentPath, level, items, pro
 
           // 詳細な権限情報を取得（共有ドライブ対応）
           let detailedPermissions = [];
+          let permissionError = null;
+
           try {
+            // 共有ドライブのファイル権限を取得
+            // 注意: useDomainAdminAccessはファイルレベルでは使用しない
             const permissionsResponse = Drive.Permissions.list(file.id, {
               supportsAllDrives: true,
-              useDomainAdminAccess: true,
-              fields: 'permissions(id,type,role,emailAddress,displayName,domain)'
+              fields: 'permissions(id,type,role,emailAddress,displayName,domain,permissionDetails)'
             });
             detailedPermissions = permissionsResponse.permissions || [];
+
+            // デバッグ用：権限数をログ出力
+            if (detailedPermissions.length === 0) {
+              console.log(`権限が0件: ${file.name} (${file.id})`);
+            } else {
+              console.log(`権限取得成功: ${file.name} - ${detailedPermissions.length}件`);
+            }
           } catch (permError) {
-            // 権限取得に失敗した場合は空の配列を使用（エラーログは出力しない）
+            // 権限取得エラーをログに記録
+            console.error(`権限取得エラー: ${file.name} (${file.id})`, permError);
+            permissionError = permError.message;
             detailedPermissions = [];
+          }
+
+          // 権限レベル別にメンバーを分類
+          const membersByRole = getDriveMembersByRole(detailedPermissions);
+
+          // 共有ドライブレベルの権限を分類
+          const driveMembers = getDriveMembersByRole(drivePermissions);
+
+          // フォルダとファイルで表示する権限を調整
+          let organizers, fileOrganizers, writers, editors, commenters, readers;
+
+          if (isFolder) {
+            // フォルダの場合：編集者は「ー」、その他は上位権限+個別権限を組み合わせ
+            organizers = combinePermissions(driveMembers.organizers, membersByRole.organizers);
+            fileOrganizers = combinePermissions(driveMembers.fileOrganizers, membersByRole.fileOrganizers);
+            writers = combinePermissions(driveMembers.writers, membersByRole.writers);
+            editors = 'ー';  // フォルダに編集者の概念はない
+            commenters = combinePermissions(driveMembers.commenters, membersByRole.commenters);
+            readers = combinePermissions(driveMembers.readers, membersByRole.readers);
+          } else {
+            // ファイルの場合：上位権限の管理者/コンテンツ管理者/投稿者も表示
+            organizers = driveMembers.organizers.join(', ');
+            fileOrganizers = driveMembers.fileOrganizers.join(', ');
+            writers = driveMembers.writers.join(', ');
+            editors = membersByRole.editors.join(', ');
+            commenters = combinePermissions(driveMembers.commenters, membersByRole.commenters);
+            readers = combinePermissions(driveMembers.readers, membersByRole.readers);
           }
 
           // アイテム情報を収集
@@ -310,8 +375,13 @@ function collectItemsRecursive(driveId, parentId, currentPath, level, items, pro
             createdTime: file.createdTime,
             modifiedTime: file.modifiedTime,
             size: formatFileSize(file.size),
-            permissions: getPermissionsSummary(detailedPermissions),
-            externalSharing: checkExternalSharing(detailedPermissions),
+            organizers: organizers,
+            fileOrganizers: fileOrganizers,
+            writers: writers,
+            editors: editors,
+            commenters: commenters,
+            readers: readers,
+            externalSharing: permissionError ? `エラー: ${permissionError}` : checkExternalSharing(detailedPermissions),
             url: file.webViewLink
           };
 
@@ -321,7 +391,7 @@ function collectItemsRecursive(driveId, parentId, currentPath, level, items, pro
           if (isFolder) {
             stats.totalFolders++;
             // フォルダの場合は再帰的に処理
-            collectItemsRecursive(driveId, file.id, `${itemPath}/`, level + 1, items, processedIds, stats);
+            collectItemsRecursive(driveId, file.id, `${itemPath}/`, level + 1, items, processedIds, stats, drivePermissions);
           } else {
             stats.totalFiles++;
             const fileSize = parseInt(file.size) || 0;
@@ -479,6 +549,141 @@ function getPermissionsSummary(permissions) {
 }
 
 /**
+ * 権限を持つ全メンバーをリスト化（表示名:メールアドレス形式）
+ * @param {Array} permissions 権限配列
+ * @returns {string} メンバーリスト（カンマ区切り）
+ */
+function getAllMembers(permissions) {
+  if (!permissions || permissions.length === 0) {
+    return '';
+  }
+
+  const members = [];
+
+  for (const permission of permissions) {
+    const type = permission.type || '';
+    let identifier = '';
+
+    // メールアドレスと表示名がある場合
+    if (permission.emailAddress && permission.displayName) {
+      identifier = `${permission.displayName}:${permission.emailAddress}`;
+    } else if (permission.emailAddress) {
+      identifier = permission.emailAddress;
+    } else if (permission.displayName) {
+      identifier = permission.displayName;
+    } else if (permission.domain) {
+      identifier = `@${permission.domain}`;
+    } else if (type === 'anyone') {
+      identifier = '全員';
+    }
+
+    if (identifier) {
+      members.push(identifier);
+    }
+  }
+
+  return members.join(', ');
+}
+
+/**
+ * 上位権限と個別権限を組み合わせて重複を除去
+ * @param {Array} upperPermissions 上位権限（共有ドライブレベル）の配列
+ * @param {Array} individualPermissions 個別権限の配列
+ * @returns {string} 組み合わせた権限文字列（カンマ区切り）
+ */
+function combinePermissions(upperPermissions, individualPermissions) {
+  const combined = new Set();
+
+  // 上位権限を追加（先に追加して優先表示）
+  if (upperPermissions && upperPermissions.length > 0) {
+    upperPermissions.forEach(permission => {
+      if (permission && permission.trim()) {
+        combined.add(permission.trim());
+      }
+    });
+  }
+
+  // 個別権限を追加
+  if (individualPermissions && individualPermissions.length > 0) {
+    individualPermissions.forEach(permission => {
+      if (permission && permission.trim()) {
+        combined.add(permission.trim());
+      }
+    });
+  }
+
+  return Array.from(combined).join(', ');
+}
+
+/**
+ * 共有ドライブのメンバーを権限レベル別に分類
+ * @param {Array} permissions 権限配列
+ * @returns {Object} 権限レベル別のメンバーリスト
+ */
+function getDriveMembersByRole(permissions) {
+  const result = {
+    organizers: [],        // 管理者 (organizer)
+    fileOrganizers: [],    // コンテンツ管理者 (fileOrganizer)
+    writers: [],           // 投稿者 (writer)
+    editors: [],           // 編集者 (ファイルのwriter相当)
+    commenters: [],        // 閲覧者（コメント可） (commenter)
+    readers: []            // 閲覧者 (reader)
+  };
+
+  if (!permissions || permissions.length === 0) {
+    return result;
+  }
+
+  for (const permission of permissions) {
+    const role = permission.role || '';
+    const type = permission.type || '';
+    let identifier = '';
+
+    // メールアドレスと表示名がある場合
+    if (permission.emailAddress && permission.displayName) {
+      identifier = `${permission.displayName}:${permission.emailAddress}`;
+    } else if (permission.emailAddress) {
+      identifier = permission.emailAddress;
+    } else if (permission.displayName) {
+      identifier = permission.displayName;
+    } else if (permission.domain) {
+      identifier = `@${permission.domain}`;
+    } else if (type === 'anyone') {
+      identifier = '全員';
+    }
+
+    if (!identifier) continue;
+
+    // 権限レベルごとに分類
+    if (role === 'organizer') {
+      result.organizers.push(identifier);
+    } else if (role === 'fileOrganizer') {
+      result.fileOrganizers.push(identifier);
+    } else if (role === 'writer') {
+      // writerは投稿者と編集者の両方に使われる可能性があるため、両方に格納
+      result.writers.push(identifier);
+      result.editors.push(identifier);
+    } else if (role === 'commenter') {
+      result.commenters.push(identifier);
+    } else if (role === 'reader') {
+      result.readers.push(identifier);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * メールアドレスが内部ドメインかどうかチェック
+ * @param {string} email メールアドレス
+ * @returns {boolean} 内部ドメインの場合true
+ */
+function isInternalDomain(email) {
+  if (!email) return false;
+  return CONFIG.COMPANY_DOMAINS.some(domain => email.endsWith(`@${domain}`));
+}
+
+/**
  * 外部共有をチェック（組織内ドメイン共有と区別）
  * @param {Array} permissions 権限配列
  * @returns {string} 外部共有状況
@@ -491,7 +696,7 @@ function checkExternalSharing(permissions) {
 
   for (const p of permissions) {
     // 組織内ドメイン全体への共有（type=domain でドメインが会社ドメインの場合）
-    if (p.type === 'domain' && p.domain === CONFIG.COMPANY_DOMAIN) {
+    if (p.type === 'domain' && CONFIG.COMPANY_DOMAINS.includes(p.domain)) {
       internalDomainShare = true;
       continue;
     }
@@ -499,9 +704,9 @@ function checkExternalSharing(permissions) {
     // 真の外部共有をチェック
     if (p.type === 'anyone') {
       externalUsers.push(p);
-    } else if (p.type === 'domain' && p.domain !== CONFIG.COMPANY_DOMAIN) {
+    } else if (p.type === 'domain' && !CONFIG.COMPANY_DOMAINS.includes(p.domain)) {
       externalUsers.push(p);
-    } else if (p.emailAddress && !p.emailAddress.endsWith(`@${CONFIG.COMPANY_DOMAIN}`)) {
+    } else if (p.emailAddress && !isInternalDomain(p.emailAddress)) {
       externalUsers.push(p);
     }
   }
@@ -593,25 +798,67 @@ function createMasterSheet(spreadsheet, sharedDrives) {
   // ヘッダー設定
   const headers = [
     'No', 'ドライブ名', 'ドライブID', '作成日', 'ファイル数', '容量(GB)',
-    '最終更新', '対応シート', '外部共有', '状況', 'URL'
+    '最終更新', '対応シート', '管理者', 'コンテンツ管理者', '投稿者', '閲覧者（コメント可）', '閲覧者', '外部共有', '状況', 'URL'
   ];
 
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
 
+  // 共有ドライブのメンバー情報と外部共有状況を取得
+  const driveMembers = {};
+  const driveExternalSharing = {};
+  for (const drive of sharedDrives) {
+    try {
+      const permissions = Drive.Permissions.list(drive.id, {
+        supportsAllDrives: true,
+        useDomainAdminAccess: true,
+        fields: 'permissions(id,type,role,emailAddress,displayName,domain)'
+      });
+      const perms = permissions.permissions || [];
+      driveMembers[drive.id] = getDriveMembersByRole(perms);
+      driveExternalSharing[drive.id] = checkExternalSharing(perms);
+    } catch (error) {
+      console.warn(`メンバー情報取得エラー (${drive.name}):`, error.message);
+      driveMembers[drive.id] = {
+        organizers: [],
+        fileOrganizers: [],
+        writers: [],
+        commenters: [],
+        readers: []
+      };
+      driveExternalSharing[drive.id] = 'なし';
+    }
+    Utilities.sleep(CONFIG.API_DELAY);
+  }
+
   // データ設定
-  const data = sharedDrives.map((drive, index) => [
-    index + 1,
-    drive.name,
-    drive.id,
-    drive.createdTime ? new Date(drive.createdTime) : '',
-    '', // ファイル数（後で更新）
-    '', // 容量（後で更新）
-    '', // 最終更新（後で更新）
-    `${String(index + 1).padStart(2, '0')}_${sanitizeSheetName(drive.name)}`,
-    '', // 外部共有（後で更新）
-    '未処理',
-    `https://drive.google.com/drive/folders/${drive.id}`
-  ]);
+  const data = sharedDrives.map((drive, index) => {
+    const members = driveMembers[drive.id] || {
+      organizers: [],
+      fileOrganizers: [],
+      writers: [],
+      commenters: [],
+      readers: []
+    };
+
+    return [
+      index + 1,
+      drive.name,
+      drive.id,
+      drive.createdTime ? new Date(drive.createdTime) : '',
+      '', // ファイル数（後で更新）
+      '', // 容量（後で更新）
+      '', // 最終更新（後で更新）
+      `${String(index + 1).padStart(2, '0')}_${sanitizeSheetName(drive.name)}`,
+      members.organizers.join(', '),        // 管理者
+      members.fileOrganizers.join(', '),    // コンテンツ管理者
+      members.writers.join(', '),           // 投稿者
+      members.commenters.join(', '),        // 閲覧者（コメント可）
+      members.readers.join(', '),           // 閲覧者
+      driveExternalSharing[drive.id] || 'なし', // 外部共有
+      '未処理',
+      `https://drive.google.com/drive/folders/${drive.id}`
+    ];
+  });
 
   if (data.length > 0) {
     sheet.getRange(2, 1, data.length, headers.length).setValues(data);
@@ -630,7 +877,7 @@ function createMasterSheet(spreadsheet, sharedDrives) {
 function setupDriveSheetHeaders(sheet) {
   const headers = [
     'レベル', 'パス', '種別', '名前', 'ID', '親ID', '作成者', '作成日',
-    '更新日', 'サイズ', '権限', '外部共有', 'URL'
+    '更新日', 'サイズ', '管理者', 'コンテンツ管理者', '投稿者', '編集者', '閲覧者（コメント可）', '閲覧者', '外部共有', 'URL'
   ];
 
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -655,7 +902,12 @@ function writeDriveDataToSheet(sheet, items) {
     item.createdTime ? new Date(item.createdTime) : '',
     item.modifiedTime ? new Date(item.modifiedTime) : '',
     item.size,
-    item.permissions,
+    item.organizers || '',
+    item.fileOrganizers || '',
+    item.writers || '',
+    item.editors || '',
+    item.commenters || '',
+    item.readers || '',
     item.externalSharing,
     item.url
   ]);
@@ -668,7 +920,7 @@ function writeDriveDataToSheet(sheet, items) {
   }
 
   // 列幅自動調整
-  sheet.autoResizeColumns(1, 13);
+  sheet.autoResizeColumns(1, 18);
 }
 
 /**
@@ -695,12 +947,29 @@ function updateMasterSheetWithStats(spreadsheet, sharedDrives, driveStats) {
       const sizeInGB = (stats.totalSize / (1024 * 1024 * 1024)).toFixed(2);
       sheet.getRange(row, 6).setValue(parseFloat(sizeInGB));
 
-      // 外部共有 (I列)
-      const externalStatus = stats.externalShareCount > 0 ? `あり(${stats.externalShareCount}件)` : 'なし';
-      sheet.getRange(row, 9).setValue(externalStatus);
+      // 外部共有 (N列) - 既存の値（共有ドライブメンバーレベル）を取得
+      const currentExternalStatus = sheet.getRange(row, 14).getValue() || '';
+      let externalStatus = '';
 
-      // 状況 (J列)
-      sheet.getRange(row, 10).setValue('完了');
+      // ファイルレベルの外部共有をチェック
+      const fileExternalCount = stats.externalShareCount || 0;
+
+      // 既に共有ドライブメンバーレベルで外部共有が検出されている場合
+      if (currentExternalStatus && currentExternalStatus !== 'なし') {
+        if (fileExternalCount > 0) {
+          externalStatus = `${currentExternalStatus}, ファイルレベル外部共有あり(${fileExternalCount}件)`;
+        } else {
+          externalStatus = currentExternalStatus;
+        }
+      } else {
+        // 共有ドライブメンバーレベルで外部共有がない場合
+        externalStatus = fileExternalCount > 0 ? `ファイルレベル外部共有あり(${fileExternalCount}件)` : 'なし';
+      }
+
+      sheet.getRange(row, 14).setValue(externalStatus);
+
+      // 状況 (O列)
+      sheet.getRange(row, 15).setValue('完了');
     }
   }
 }
