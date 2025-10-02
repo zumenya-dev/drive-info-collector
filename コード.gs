@@ -8,10 +8,14 @@
  * - 結果をスプレッドシートに出力
  *
  * 作成者: Zumenya
- * 作成日: 2025年9月29日
- * バージョン: 1.3
+ * 作成日: 2025年9月30日
+ * バージョン: 2.0
  *
  * 変更履歴:
+ * v2.0 (2025/10/02): 大規模環境対応のための処理分割
+ *   - driveGet()関数: 共有ドライブ一覧取得専用
+ *   - fileGet()関数: 1ドライブずつファイル情報を取得
+ *   - main()関数: 非推奨化（後方互換性のため残存）
  * v1.3 (2025/09/30): 権限表示の大幅改善
  *   - 「管理者」列を追加（コンテンツ管理者の左）
  *   - フォルダ: 上位権限+個別権限を組み合わせて表示
@@ -40,20 +44,160 @@ const CONFIG = {
 
   // 権限設定
   ALLOWED_USERS: [
-    '*****@*****.co.jp'   // 実行許可ユーザーのメールアドレス
+    'ono-s@demo.gicloud.co.jp'   // 実行許可ユーザーのメールアドレス
   ],
 
   // 会社ドメイン（外部共有判定用）
-  COMPANY_DOMAINS: ['*****.co.jp']
+  COMPANY_DOMAINS: ['demo.gicloud.co.jp']
 };
 
 // =============================================================================
-// メイン実行関数
+// メイン実行関数（v2.0新規追加）
 // =============================================================================
 
 /**
- * メイン実行関数
+ * 【v2.0新規】共有ドライブ一覧取得関数
+ * 全共有ドライブの基本情報を取得して「00_共有ドライブ一覧」シートに出力
+ * 最初に1回のみ実行
+ */
+function driveGet() {
+  try {
+    console.log('=== driveGet: 共有ドライブ一覧取得開始 ===');
+
+    // 権限チェック
+    if (!checkExecutionPermission()) {
+      throw new Error('実行権限がありません。管理者にお問い合わせください。');
+    }
+
+    const spreadsheet = getOrCreateSpreadsheet();
+
+    // スプレッドシートIDを保存
+    PropertiesService.getScriptProperties().setProperty('CURRENT_SPREADSHEET_ID', spreadsheet.getId());
+
+    // 共有ドライブ一覧取得
+    console.log('共有ドライブ一覧取得中...');
+    const sharedDrives = getSharedDrives();
+    console.log(`共有ドライブ数: ${sharedDrives.length}`);
+
+    // マスターシート作成・更新
+    console.log('00_共有ドライブ一覧シート作成中...');
+    createMasterSheetOnly(spreadsheet, sharedDrives);
+
+    console.log('=== driveGet: 共有ドライブ一覧取得完了 ===');
+    console.log(`次に fileGet() を手動実行して、各ドライブのファイル情報を取得してください。`);
+
+  } catch (error) {
+    console.error('driveGet処理でエラー:', error);
+    throw error;
+  }
+}
+
+/**
+ * 【v2.0新規】ファイル情報取得関数
+ * 未処理の共有ドライブを1つ処理してファイル/フォルダ情報を取得
+ * 繰り返し手動実行して全ドライブを処理
+ */
+function fileGet() {
+  try {
+    console.log('=== fileGet: ファイル情報取得開始 ===');
+
+    // 権限チェック
+    if (!checkExecutionPermission()) {
+      throw new Error('実行権限がありません。管理者にお問い合わせください。');
+    }
+
+    const spreadsheetId = PropertiesService.getScriptProperties().getProperty('CURRENT_SPREADSHEET_ID');
+    if (!spreadsheetId) {
+      throw new Error('スプレッドシートIDが見つかりません。先に driveGet() を実行してください。');
+    }
+
+    const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+    const masterSheet = spreadsheet.getSheetByName('00_共有ドライブ一覧');
+
+    if (!masterSheet) {
+      throw new Error('00_共有ドライブ一覧シートが見つかりません。先に driveGet() を実行してください。');
+    }
+
+    // 未処理の共有ドライブを検索
+    const lastRow = masterSheet.getLastRow();
+    if (lastRow < 2) {
+      throw new Error('共有ドライブ一覧にデータがありません。');
+    }
+
+    const statusColumn = 15; // O列（状況）
+    const data = masterSheet.getRange(2, 1, lastRow - 1, statusColumn).getValues();
+
+    let targetRow = -1;
+    let targetDrive = null;
+
+    for (let i = 0; i < data.length; i++) {
+      const status = data[i][statusColumn - 1]; // 0-indexed
+      if (status === '未処理' || status === '') {
+        targetRow = i + 2; // 実際の行番号
+        targetDrive = {
+          index: data[i][0], // No
+          name: data[i][1],  // ドライブ名
+          id: data[i][2],    // ドライブID
+          sheetName: data[i][7] // 対応シート
+        };
+        break;
+      }
+    }
+
+    // 未処理ドライブが見つからない場合
+    if (!targetDrive) {
+      console.log('全ての共有ドライブの処理が完了しています。');
+      Browser.msgBox('完了', '全ての共有ドライブの処理が完了しています。', Browser.Buttons.OK);
+      return;
+    }
+
+    console.log(`処理対象: ${targetDrive.name} (ID: ${targetDrive.id})`);
+
+    // ドライブ専用シート作成
+    const sheet = getOrCreateSheet(spreadsheet, targetDrive.sheetName);
+
+    // ヘッダー設定
+    setupDriveSheetHeaders(sheet);
+
+    // フォルダ・ファイル構造取得
+    const result = getDriveContents(targetDrive.id);
+    const items = result.items;
+    const stats = result.stats;
+
+    // データをシートに書き込み
+    if (items.length > 0) {
+      writeDriveDataToSheet(sheet, items);
+    }
+
+    // マスターシートの統計情報を更新
+    updateMasterSheetRow(masterSheet, targetRow, stats);
+
+    console.log(`=== fileGet: ${targetDrive.name} 処理完了 ===`);
+    console.log(`ファイル: ${stats.totalFiles}, フォルダ: ${stats.totalFolders}, 容量: ${formatFileSize(stats.totalSize.toString())}`);
+
+    // 残り件数を表示
+    const remaining = data.filter(row => row[statusColumn - 1] === '未処理' || row[statusColumn - 1] === '').length - 1;
+    if (remaining > 0) {
+      console.log(`残り ${remaining} 件の共有ドライブが未処理です。再度 fileGet() を実行してください。`);
+    } else {
+      console.log('全ての共有ドライブの処理が完了しました！');
+    }
+
+  } catch (error) {
+    console.error('fileGet処理でエラー:', error);
+    throw error;
+  }
+}
+
+// =============================================================================
+// メイン実行関数（非推奨 - v1.x互換性のため残存）
+// =============================================================================
+
+/**
+ * 【非推奨】メイン実行関数（v1.x互換）
+ * v2.0以降は driveGet() → fileGet() の分割実行を推奨
  * スプレッドシートのボタンから呼び出される
+ * @deprecated v2.0以降は driveGet() と fileGet() を使用してください
  */
 function main() {
   try {
@@ -788,7 +932,131 @@ function logError(context, errorMessage) {
 // =============================================================================
 
 /**
- * マスターシートを作成・更新
+ * 【v2.0新規】マスターシートを作成（統計情報なし）
+ * driveGet()専用: 共有ドライブ一覧のみ作成し、統計情報は空欄
+ * @param {Spreadsheet} spreadsheet スプレッドシート
+ * @param {Array} sharedDrives 共有ドライブリスト
+ */
+function createMasterSheetOnly(spreadsheet, sharedDrives) {
+  const sheet = getOrCreateSheet(spreadsheet, '00_共有ドライブ一覧');
+
+  // ヘッダー設定
+  const headers = [
+    'No', 'ドライブ名', 'ドライブID', '作成日', 'ファイル数', '容量(GB)',
+    '最終更新', '対応シート', '管理者', 'コンテンツ管理者', '投稿者', '閲覧者（コメント可）', '閲覧者', '外部共有', '状況', 'URL'
+  ];
+
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+
+  // 共有ドライブのメンバー情報と外部共有状況を取得
+  const driveMembers = {};
+  const driveExternalSharing = {};
+  for (const drive of sharedDrives) {
+    try {
+      const permissions = Drive.Permissions.list(drive.id, {
+        supportsAllDrives: true,
+        useDomainAdminAccess: true,
+        fields: 'permissions(id,type,role,emailAddress,displayName,domain)'
+      });
+      const perms = permissions.permissions || [];
+      driveMembers[drive.id] = getDriveMembersByRole(perms);
+      driveExternalSharing[drive.id] = checkExternalSharing(perms);
+    } catch (error) {
+      console.warn(`メンバー情報取得エラー (${drive.name}):`, error.message);
+      driveMembers[drive.id] = {
+        organizers: [],
+        fileOrganizers: [],
+        writers: [],
+        commenters: [],
+        readers: []
+      };
+      driveExternalSharing[drive.id] = 'なし';
+    }
+    Utilities.sleep(CONFIG.API_DELAY);
+  }
+
+  // データ設定（統計情報は空欄）
+  const data = sharedDrives.map((drive, index) => {
+    const members = driveMembers[drive.id] || {
+      organizers: [],
+      fileOrganizers: [],
+      writers: [],
+      commenters: [],
+      readers: []
+    };
+
+    return [
+      index + 1,
+      drive.name,
+      drive.id,
+      drive.createdTime ? new Date(drive.createdTime) : '',
+      '', // ファイル数（fileGet()で更新）
+      '', // 容量（fileGet()で更新）
+      '', // 最終更新（fileGet()で更新）
+      `${String(index + 1).padStart(2, '0')}_${sanitizeSheetName(drive.name)}`,
+      members.organizers.join(', '),        // 管理者
+      members.fileOrganizers.join(', '),    // コンテンツ管理者
+      members.writers.join(', '),           // 投稿者
+      members.commenters.join(', '),        // 閲覧者（コメント可）
+      members.readers.join(', '),           // 閲覧者
+      driveExternalSharing[drive.id] || 'なし', // 外部共有
+      '未処理',
+      `https://drive.google.com/drive/folders/${drive.id}`
+    ];
+  });
+
+  if (data.length > 0) {
+    sheet.getRange(2, 1, data.length, headers.length).setValues(data);
+  }
+
+  // 書式設定
+  sheet.getRange(1, 1, 1, headers.length).setBackground('#4285f4').setFontColor('white').setFontWeight('bold');
+  sheet.setFrozenRows(1);
+  sheet.autoResizeColumns(1, headers.length);
+}
+
+/**
+ * 【v2.0新規】マスターシートの1行を統計情報で更新
+ * fileGet()専用: 処理完了したドライブの統計情報を更新
+ * @param {Sheet} masterSheet マスターシート
+ * @param {number} row 更新する行番号
+ * @param {Object} stats 統計情報
+ */
+function updateMasterSheetRow(masterSheet, row, stats) {
+  // ファイル数 (E列: 5)
+  masterSheet.getRange(row, 5).setValue(stats.totalFiles);
+
+  // 容量(GB) (F列: 6)
+  const sizeInGB = (stats.totalSize / (1024 * 1024 * 1024)).toFixed(2);
+  masterSheet.getRange(row, 6).setValue(parseFloat(sizeInGB));
+
+  // 外部共有 (N列: 14) - 既存の値（共有ドライブメンバーレベル）を取得
+  const currentExternalStatus = masterSheet.getRange(row, 14).getValue() || '';
+  let externalStatus = '';
+
+  // ファイルレベルの外部共有をチェック
+  const fileExternalCount = stats.externalShareCount || 0;
+
+  // 既に共有ドライブメンバーレベルで外部共有が検出されている場合
+  if (currentExternalStatus && currentExternalStatus !== 'なし') {
+    if (fileExternalCount > 0) {
+      externalStatus = `${currentExternalStatus}, ファイルレベル外部共有あり(${fileExternalCount}件)`;
+    } else {
+      externalStatus = currentExternalStatus;
+    }
+  } else {
+    // 共有ドライブメンバーレベルで外部共有がない場合
+    externalStatus = fileExternalCount > 0 ? `ファイルレベル外部共有あり(${fileExternalCount}件)` : 'なし';
+  }
+
+  masterSheet.getRange(row, 14).setValue(externalStatus);
+
+  // 状況 (O列: 15)
+  masterSheet.getRange(row, 15).setValue('完了');
+}
+
+/**
+ * 【v1.x互換】マスターシートを作成・更新
  * @param {Spreadsheet} spreadsheet スプレッドシート
  * @param {Array} sharedDrives 共有ドライブリスト
  */
