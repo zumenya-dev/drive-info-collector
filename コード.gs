@@ -1,6 +1,6 @@
 /**
- * Google Drive 共有ドライブ情報収集ツール v2.1
- * 全共有ドライブのフォルダ・ファイル構造と権限情報を取得
+ * Google Drive 共有ドライブ情報収集ツール v2.2
+ * 全共有ドライブのフォルダ・ファイル構造と権限情報、共有設定を取得
  */
 
 const CONFIG = {
@@ -21,7 +21,11 @@ const SHEET_COLUMNS = {
     SIZE_GB: 6,
     SHEET_NAME: 8,
     EXTERNAL_SHARE: 14,
-    STATUS: 15
+    DOMAIN_USERS_ONLY: 15,      // 組織外アクセス
+    DRIVE_MEMBERS_ONLY: 16,     // メンバー外アクセス
+    SHARING_FOLDERS: 17,        // フォルダ共有(コンテンツ管理者)
+    COPY_RESTRICTION: 18,       // コピー制限
+    STATUS: 19                  // 状況
   },
   DATA_ROW_START: 2
 };
@@ -223,7 +227,7 @@ function getSharedDrives() {
     do {
       const params = {
         pageSize: 100,
-        fields: 'nextPageToken,drives(id,name,createdTime,capabilities)',
+        fields: 'nextPageToken,drives(id,name,createdTime,capabilities,restrictions)',
         useDomainAdminAccess: true
       };
 
@@ -786,7 +790,9 @@ function createMasterSheet(spreadsheet, sharedDrives) {
 
   const headers = [
     'No', 'ドライブ名', 'ドライブID', '作成日', 'ファイル数', '容量(GB)',
-    '最終更新', '対応シート', '管理者', 'コンテンツ管理者', '投稿者', '閲覧者(コメント可)', '閲覧者', '外部共有', '状況', 'URL'
+    '最終更新', '対応シート', '管理者', 'コンテンツ管理者', '投稿者', '閲覧者(コメント可)', '閲覧者', '外部共有',
+    '組織外アクセス', 'メンバー外アクセス', 'フォルダ共有(コンテンツ管理者)', 'コピー制限',
+    '状況', 'URL'
   ];
 
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -812,6 +818,13 @@ function createMasterSheet(spreadsheet, sharedDrives) {
 
   const data = sharedDrives.map((drive, index) => {
     const members = driveMembers[drive.id] || createEmptyMembers();
+    const restrictions = drive.restrictions || {};
+
+    // 設定情報の判定
+    const domainUsersOnly = restrictions.domainUsersOnly ? '禁止' : '許可';
+    const driveMembersOnly = restrictions.driveMembersOnly ? '禁止' : '許可';
+    const sharingFoldersRequiresOrganizer = restrictions.sharingFoldersRequiresOrganizerPermission ? '管理者のみ' : '許可';
+    const copyRequiresWriter = restrictions.copyRequiresWriterPermission ? '投稿者以上' : '全員可';
 
     return [
       index + 1,
@@ -828,6 +841,10 @@ function createMasterSheet(spreadsheet, sharedDrives) {
       members.commenters.join(', '),
       members.readers.join(', '),
       driveExternalSharing[drive.id] || 'なし',
+      domainUsersOnly,
+      driveMembersOnly,
+      sharingFoldersRequiresOrganizer,
+      copyRequiresWriter,
       '未処理',
       `https://drive.google.com/drive/folders/${drive.id}`
     ];
