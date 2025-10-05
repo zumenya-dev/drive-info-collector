@@ -266,6 +266,11 @@ function getLastModifiedTime(driveId) {
     }
     return null;
   } catch (error) {
+    // メンバーシップエラー（403）の場合は権限なしとして扱う
+    if (error.message && error.message.includes('shared drive membership')) {
+      return 'NO_PERMISSION';
+    }
+    // その他のエラーはログに出力
     console.error(`最終更新日取得エラー (${driveId}):`, error);
     return null;
   }
@@ -858,7 +863,13 @@ function createMasterSheet(spreadsheet, sharedDrives) {
     const copyRequiresWriter = restrictions.copyRequiresWriterPermission ? '投稿者以上' : '全員可';
 
     // 最終更新日と非表示フラグ
-    const lastModified = driveLastModified[drive.id] ? new Date(driveLastModified[drive.id]) : '';
+    const lastModifiedValue = driveLastModified[drive.id];
+    let lastModified = '';
+    if (lastModifiedValue === 'NO_PERMISSION') {
+      lastModified = '権限なし';
+    } else if (lastModifiedValue) {
+      lastModified = new Date(lastModifiedValue);
+    }
     const isHidden = drive.hidden ? '非表示' : '表示';
 
     return [
