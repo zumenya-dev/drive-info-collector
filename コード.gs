@@ -1,6 +1,6 @@
 /**
- * Google Drive 共有ドライブ情報収集ツール v2.2
- * 全共有ドライブのフォルダ・ファイル構造と権限情報、共有設定を取得
+ * Google Drive 共有ドライブ情報収集ツール v2.3
+ * 全共有ドライブのフォルダ・ファイル構造と権限情報、共有設定、活動状況を取得
  */
 
 const CONFIG = {
@@ -19,13 +19,15 @@ const SHEET_COLUMNS = {
   MASTER: {
     FILE_COUNT: 5,
     SIZE_GB: 6,
+    LAST_MODIFIED: 7,           // 最終更新日
     SHEET_NAME: 8,
     EXTERNAL_SHARE: 14,
     DOMAIN_USERS_ONLY: 15,      // 組織外アクセス
     DRIVE_MEMBERS_ONLY: 16,     // メンバー外アクセス
     SHARING_FOLDERS: 17,        // フォルダ共有(コンテンツ管理者)
     COPY_RESTRICTION: 18,       // コピー制限
-    STATUS: 19                  // 状況
+    HIDDEN: 19,                 // 非表示
+    STATUS: 20                  // 状況
   },
   DATA_ROW_START: 2
 };
@@ -227,7 +229,7 @@ function getSharedDrives() {
     do {
       const params = {
         pageSize: 100,
-        fields: 'nextPageToken,drives(id,name,createdTime,capabilities,restrictions)',
+        fields: 'nextPageToken,drives(id,name,createdTime,capabilities,restrictions,hidden)',
         useDomainAdminAccess: true
       };
 
@@ -243,6 +245,29 @@ function getSharedDrives() {
 
   } catch (error) {
     throw new Error(`共有ドライブの取得に失敗しました: ${error.message}`);
+  }
+}
+
+function getLastModifiedTime(driveId) {
+  try {
+    const response = Drive.Files.list({
+      driveId: driveId,
+      corpora: 'drive',
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+      pageSize: 1,
+      orderBy: 'modifiedTime desc',
+      fields: 'files(modifiedTime)',
+      useDomainAdminAccess: true
+    });
+
+    if (response.files && response.files.length > 0) {
+      return response.files[0].modifiedTime;
+    }
+    return null;
+  } catch (error) {
+    console.error(`最終更新日取得エラー (${driveId}):`, error);
+    return null;
   }
 }
 
@@ -790,15 +815,17 @@ function createMasterSheet(spreadsheet, sharedDrives) {
 
   const headers = [
     'No', 'ドライブ名', 'ドライブID', '作成日', 'ファイル数', '容量(GB)',
-    '最終更新', '対応シート', '管理者', 'コンテンツ管理者', '投稿者', '閲覧者(コメント可)', '閲覧者', '外部共有',
+    '最終更新日', '対応シート', '管理者', 'コンテンツ管理者', '投稿者', '閲覧者(コメント可)', '閲覧者', '外部共有',
     '組織外アクセス', 'メンバー外アクセス', 'フォルダ共有(コンテンツ管理者)', 'コピー制限',
-    '状況', 'URL'
+    '非表示', '状況', 'URL'
   ];
 
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
 
   const driveMembers = {};
   const driveExternalSharing = {};
+  const driveLastModified = {};
+
   for (const drive of sharedDrives) {
     try {
       const permissions = Drive.Permissions.list(drive.id, {
@@ -813,6 +840,10 @@ function createMasterSheet(spreadsheet, sharedDrives) {
       driveMembers[drive.id] = createEmptyMembers();
       driveExternalSharing[drive.id] = 'なし';
     }
+
+    // 最終更新日を取得
+    driveLastModified[drive.id] = getLastModifiedTime(drive.id);
+
     Utilities.sleep(CONFIG.API_DELAY);
   }
 
@@ -826,6 +857,10 @@ function createMasterSheet(spreadsheet, sharedDrives) {
     const sharingFoldersRequiresOrganizer = restrictions.sharingFoldersRequiresOrganizerPermission ? '管理者のみ' : '許可';
     const copyRequiresWriter = restrictions.copyRequiresWriterPermission ? '投稿者以上' : '全員可';
 
+    // 最終更新日と非表示フラグ
+    const lastModified = driveLastModified[drive.id] ? new Date(driveLastModified[drive.id]) : '';
+    const isHidden = drive.hidden ? '非表示' : '表示';
+
     return [
       index + 1,
       drive.name,
@@ -833,7 +868,7 @@ function createMasterSheet(spreadsheet, sharedDrives) {
       drive.createdTime ? new Date(drive.createdTime) : '',
       '',
       '',
-      '',
+      lastModified,
       `${String(index + 1).padStart(2, '0')}_${sanitizeSheetName(drive.name)}`,
       members.organizers.join(', '),
       members.fileOrganizers.join(', '),
@@ -845,6 +880,7 @@ function createMasterSheet(spreadsheet, sharedDrives) {
       driveMembersOnly,
       sharingFoldersRequiresOrganizer,
       copyRequiresWriter,
+      isHidden,
       '未処理',
       `https://drive.google.com/drive/folders/${drive.id}`
     ];
